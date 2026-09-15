@@ -37,12 +37,12 @@ const navItems: { view: View; label: string; icon: typeof LayoutDashboard }[] = 
 export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
   return (
     <aside className="w-full md:w-60 md:shrink-0 bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-800 flex flex-col md:h-screen md:sticky md:top-0">
-      <div className="px-4 sm:px-5 py-4 md:py-5 border-b border-slate-800">
+      <div className="px-5 py-5 border-b border-slate-800">
         <div className="flex items-center gap-2.5">
           <img
             src="/solscanner-logo.png"
             alt="SolScanner"
-            className="w-9 h-9 object-contain shrink-0"
+            className="w-9 h-9 object-contain"
           />
 
           <div>
@@ -56,7 +56,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
         </div>
       </div>
 
-      <nav className="flex md:flex-1 overflow-x-auto md:overflow-y-auto md:overflow-x-hidden py-2 md:py-3 px-2 space-x-1 md:space-x-0 md:space-y-0.5 scrollbar-none">
+      <nav className="flex-1 overflow-x-auto md:overflow-y-auto md:overflow-x-hidden py-3 px-2 space-x-1 md:space-x-0 md:space-y-0.5">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = current === item.view;
@@ -65,7 +65,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
             <button
               key={item.view}
               onClick={() => onNavigate(item.view)}
-              className={`shrink-0 md:shrink w-auto md:w-full flex items-center gap-2 md:gap-3 px-3 py-2.5 md:py-2.5 rounded-lg text-xs md:text-sm font-medium transition-all ${
+              className={`shrink-0 md:shrink md:w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                 active
                   ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent"
@@ -76,7 +76,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
                 className={active ? "text-sky-400" : "text-slate-500"}
               />
 
-              <span className="whitespace-nowrap md:flex-1 md:text-left">
+              <span className="flex-1 text-left whitespace-nowrap">
                 {item.label}
               </span>
 
