@@ -1,3 +1,4 @@
+
 import { useEffect, useState, useCallback } from "react";
 import type { View, Token, WatchlistEntry } from "@/types";
 import { supabase } from "@/lib/supabase";
@@ -23,13 +24,23 @@ export default function App() {
   const [watchlistRefreshKey, setWatchlistRefreshKey] = useState(0);
 
   const loadWatchlist = useCallback(async () => {
-    const { data } = await supabase.from("watchlist").select("*").order("added_at", { ascending: false });
+    const { data } = await supabase
+      .from("watchlist")
+      .select("*")
+      .order("added_at", { ascending: false });
+
     setWatchlist(data ?? []);
-    setWatchedAddresses(new Set((data ?? []).map((w) => w.token_address)));
+    setWatchedAddresses(
+      new Set((data ?? []).map((w) => w.token_address))
+    );
   }, []);
 
   const loadActiveAlerts = useCallback(async () => {
-    const { count } = await supabase.from("alerts").select("*", { count: "exact", head: true }).eq("active", true);
+    const { count } = await supabase
+      .from("alerts")
+      .select("*", { count: "exact", head: true })
+      .eq("active", true);
+
     setActiveAlerts(count ?? 0);
   }, []);
 
@@ -46,6 +57,7 @@ export default function App() {
   const handleWatch = async (token: Token) => {
     if (watchedAddresses.has(token.address)) {
       const entry = watchlist.find((w) => w.token_address === token.address);
+
       if (entry) {
         await supabase.from("watchlist").delete().eq("id", entry.id);
       }
@@ -56,6 +68,7 @@ export default function App() {
         token_name: token.name,
       });
     }
+
     await loadWatchlist();
     setWatchlistRefreshKey((k) => k + 1);
   };
@@ -71,9 +84,14 @@ export default function App() {
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-950 text-slate-200">
-      <Sidebar current={view} onNavigate={handleNavigate} alertCount={activeAlerts} />
-      <main className="flex-1 overflow-y-auto p-6">
+    <div className="flex min-h-screen flex-col md:flex-row bg-slate-950 text-slate-200">
+      <Sidebar
+        current={view}
+        onNavigate={handleNavigate}
+        alertCount={activeAlerts}
+      />
+
+      <main className="flex-1 min-w-0 overflow-y-auto p-3 sm:p-4 md:p-6">
         {view === "dashboard" && (
           <Dashboard
             onTokenClick={handleTokenClick}
@@ -82,6 +100,7 @@ export default function App() {
             watchedAddresses={watchedAddresses}
           />
         )}
+
         {view === "new-trending" && (
           <NewTrending
             onTokenClick={handleTokenClick}
@@ -89,6 +108,7 @@ export default function App() {
             watchedAddresses={watchedAddresses}
           />
         )}
+
         {view === "graduated" && (
           <Graduated
             onTokenClick={handleTokenClick}
@@ -96,6 +116,7 @@ export default function App() {
             watchedAddresses={watchedAddresses}
           />
         )}
+
         {view === "most-held" && (
           <MostHeld
             onTokenClick={handleTokenClick}
@@ -103,6 +124,7 @@ export default function App() {
             watchedAddresses={watchedAddresses}
           />
         )}
+
         {view === "top-movers" && (
           <TopMovers
             onTokenClick={handleTokenClick}
@@ -110,6 +132,7 @@ export default function App() {
             watchedAddresses={watchedAddresses}
           />
         )}
+
         {view === "signal-score" && (
           <SignalScoreView
             onTokenClick={handleTokenClick}
@@ -117,15 +140,23 @@ export default function App() {
             watchedAddresses={watchedAddresses}
           />
         )}
+
         {view === "token-scanner" && (
-          <TokenScanner mint={scannerMint} onBack={() => setView("dashboard")} onScan={(addr) => setScannerMint(addr)} />
+          <TokenScanner
+            mint={scannerMint}
+            onBack={() => setView("dashboard")}
+            onScan={(addr) => setScannerMint(addr)}
+          />
         )}
+
         {view === "risk-scanner" && (
           <RiskScanner onTokenClick={handleTokenClick} />
         )}
+
         {view === "alerts" && (
           <Alerts onTokenClick={handleTokenClick} />
         )}
+
         {view === "watchlist" && (
           <Watchlist
             watchlist={watchlist}
@@ -134,6 +165,7 @@ export default function App() {
             refreshKey={watchlistRefreshKey}
           />
         )}
+
         {view === "market-overview" && (
           <MarketOverview onTokenClick={handleTokenClick} />
         )}
@@ -141,3 +173,4 @@ export default function App() {
     </div>
   );
 }
+

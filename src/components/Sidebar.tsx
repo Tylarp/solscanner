@@ -36,37 +36,50 @@ const navItems: { view: View; label: string; icon: typeof LayoutDashboard }[] = 
 
 export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
   return (
-    <aside className="w-60 shrink-0 bg-slate-900/80 border-r border-slate-800 flex flex-col h-screen sticky top-0">
-      <div className="px-5 py-5 border-b border-slate-800">
+    <aside className="w-full md:w-60 md:shrink-0 bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-800 flex flex-col md:h-screen md:sticky md:top-0">
+      <div className="px-4 sm:px-5 py-4 md:py-5 border-b border-slate-800">
         <div className="flex items-center gap-2.5">
           <img
             src="/solscanner-logo.png"
             alt="SolScanner"
-            className="w-9 h-9 object-contain"
+            className="w-9 h-9 object-contain shrink-0"
           />
+
           <div>
-            <div className="font-bold text-slate-100 text-sm tracking-tight">SOLSCAN AI</div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Memecoin Intel</div>
+            <div className="font-bold text-slate-100 text-sm tracking-tight">
+              SOLSCAN AI
+            </div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">
+              Memecoin Intel
+            </div>
           </div>
         </div>
       </div>
 
-      <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
+      <nav className="flex md:flex-1 overflow-x-auto md:overflow-y-auto md:overflow-x-hidden py-2 md:py-3 px-2 space-x-1 md:space-x-0 md:space-y-0.5 scrollbar-none">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = current === item.view;
+
           return (
             <button
               key={item.view}
               onClick={() => onNavigate(item.view)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              className={`shrink-0 md:shrink w-auto md:w-full flex items-center gap-2 md:gap-3 px-3 py-2.5 md:py-2.5 rounded-lg text-xs md:text-sm font-medium transition-all ${
                 active
                   ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent"
               }`}
             >
-              <Icon size={17} className={active ? "text-sky-400" : "text-slate-500"} />
-              <span className="flex-1 text-left">{item.label}</span>
+              <Icon
+                size={17}
+                className={active ? "text-sky-400" : "text-slate-500"}
+              />
+
+              <span className="whitespace-nowrap md:flex-1 md:text-left">
+                {item.label}
+              </span>
+
               {item.view === "alerts" && alertCount > 0 && (
                 <span className="px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400 text-[10px] font-bold">
                   {alertCount}
@@ -77,11 +90,12 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
         })}
       </nav>
 
-      <div className="px-4 py-3 border-t border-slate-800">
+      <div className="hidden md:block px-4 py-3 border-t border-slate-800">
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           Live on-chain data
         </div>
+
         <div className="mt-1.5 text-[10px] text-slate-600">
           Powered by DexScreener · Solana
         </div>
@@ -89,4 +103,3 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
     </aside>
   );
 }
-
