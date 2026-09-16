@@ -12,6 +12,7 @@ import {
   Bell,
   Star,
   Sparkles,
+  Github,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -90,6 +91,30 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
         })}
       </nav>
 
+      {/* GitHub Project */}
+      <div className="px-3 py-3 border-t border-slate-800">
+        <a
+          href="https://github.com/Tylarp/QuantBot"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block rounded-lg border border-slate-800 bg-slate-950/50 p-3 hover:border-slate-700 hover:bg-slate-800/50 transition-all"
+        >
+          <div className="flex items-center gap-2.5">
+            <Github size={18} className="text-slate-400" />
+
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-slate-200">
+                SolScanner
+              </div>
+
+              <div className="text-[10px] text-slate-500 truncate">
+                View source on GitHub
+              </div>
+            </div>
+          </div>
+        </a>
+      </div>
+
       <div className="hidden md:block px-4 py-3 border-t border-slate-800">
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -103,3 +128,4 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
     </aside>
   );
 }
+
