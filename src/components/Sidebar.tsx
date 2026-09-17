@@ -97,7 +97,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
           href="https://github.com/Tylarp/QuantBot"
           target="_blank"
           rel="noopener noreferrer"
-          className="block rounded-lg border border-slate-800 bg-slate-950/50 p-4 hover:border-slate-700 hover:bg-slate-800/50 transition-all"
+          className="block rounded-lg border border-slate-800 bg-slate-950/50 p-6 hover:border-slate-700 hover:bg-slate-800/50 transition-all"
         >
           <div className="flex items-center gap-2.5">
             <Github size={21} className="text-slate-400" />
@@ -108,7 +108,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
               </div>
 
               <div className="text-[10px] text-slate-500 truncate">
-                View original AI bot this site is based on
+                View original memecoin bot files
               </div>
             </div>
           </div>
