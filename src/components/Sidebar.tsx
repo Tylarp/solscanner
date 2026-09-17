@@ -100,7 +100,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
           className="block rounded-lg border border-slate-800 bg-slate-950/50 p-6 hover:border-slate-700 hover:bg-slate-800/50 transition-all"
         >
           <div className="flex items-center gap-2.5">
-            <Github size={25} className="text-slate-400" />
+            <Github size={30} className="text-slate-400" />
 
             <div className="min-w-0">
               <div className="text-base font-semibold text-slate-200">
