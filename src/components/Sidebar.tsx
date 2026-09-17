@@ -48,7 +48,7 @@ export function Sidebar({ current, onNavigate, alertCount }: SidebarProps) {
 
           <div>
             <div className="font-bold text-slate-100 text-sm tracking-tight">
-              SOLSCAN AI
+              MemeMentum
             </div>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider">
               Memecoin Intel
