@@ -45,7 +45,6 @@ export function shortenAddress(addr: string): string {
 export function computeRiskReport(token: Token): RiskReport {
   const factors: RiskFactor[] = [];
 
-  const topHolderPct = 0;
   factors.push({
     label: "Liquidity Level",
     severity: token.liquidity < 10000 ? "critical" : token.liquidity < 50000 ? "high" : token.liquidity < 100000 ? "medium" : "low",
@@ -56,7 +55,7 @@ export function computeRiskReport(token: Token): RiskReport {
   factors.push({
     label: "Holder Count",
     severity: token.holders < 50 ? "high" : token.holders < 200 ? "medium" : "low",
-    detail: `${token.holders} holders`,
+    detail: `${formatNumber(token.holders)} holders`,
     verified: true,
   });
 
@@ -112,10 +111,10 @@ export function computeSignalScore(token: Token): SignalScore {
     contribution: Math.min(20, volLiqRatio * 4),
   });
 
-  const holderScore = Math.min(20, (token.holders / 500) * 20);
+  const holderScore = Math.min(20, (token.holders / 1000) * 20);
   factors.push({
     label: "Holder Count",
-    value: `${token.holders}`,
+    value: formatNumber(token.holders),
     weight: 20,
     contribution: holderScore,
   });

@@ -160,6 +160,7 @@ export function TokenScanner({ mint, onBack, onScan }: TokenScannerProps) {
   const topHolders = holders.slice(0, 10);
   const holderPcts = topHolders.map((h) => h.pct);
   const topHolderConcentration = holderPcts.slice(0, 5).reduce((s, p) => s + p, 0);
+  const totalHolderPct = holderPcts.reduce((s, p) => s + p, 0);
 
   const solscanUrl = `https://solscan.io/token/${mint}`;
   const dexscreenerUrl = `https://dexscreener.com/solana/${mint}`;
@@ -209,7 +210,7 @@ export function TokenScanner({ mint, onBack, onScan }: TokenScannerProps) {
             { label: "Volume 24h", value: formatUsd(market.volume_24h) },
             { label: "FDV", value: formatUsd(market.fdv) },
             { label: "Holders", value: formatNumber(info.holders) },
-            { label: "Trades (recent)", value: formatNumber(trades.length) },
+            { label: "Supply", value: formatNumber(info.supply) },
             { label: "Buys / Sells", value: `${buyTrades} / ${sellTrades}` },
             { label: "Created", value: timeAgo(market.created_at) },
           ].map((s) => (
@@ -276,9 +277,15 @@ export function TokenScanner({ mint, onBack, onScan }: TokenScannerProps) {
                 {topHolders.map((h, i) => (
                   <div key={i} className="flex items-center justify-between text-xs">
                     <span className="text-slate-400 font-mono">{i + 1}. {shortenAddress(h.owner)}</span>
-                    <span className="text-slate-300 font-mono">{h.pct.toFixed(2)}%</span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 font-mono">{formatNumber(h.balance)}</span>
+                      <span className="text-slate-300 font-mono w-16 text-right">{h.pct.toFixed(2)}%</span>
+                    </div>
                   </div>
                 ))}
+              </div>
+              <div className="text-xs text-slate-600 mt-2 pt-2 border-t border-slate-800">
+                Top {topHolders.length} holders own {totalHolderPct.toFixed(1)}% of supply
               </div>
             </>
           ) : (
