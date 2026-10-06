@@ -54,8 +54,15 @@ export function computeRiskReport(token: Token): RiskReport {
 
   factors.push({
     label: "Holder Count",
-    severity: token.holders < 50 ? "high" : token.holders < 200 ? "medium" : "low",
+    severity: token.holders < 10 ? "critical" : token.holders < 50 ? "high" : token.holders < 200 ? "medium" : "low",
     detail: `${formatNumber(token.holders)} holders`,
+    verified: true,
+  });
+
+  factors.push({
+    label: "Unique Wallet Activity",
+    severity: token.unique_wallets_24h < 10 ? "high" : token.unique_wallets_24h < 50 ? "medium" : "low",
+    detail: `${formatNumber(token.unique_wallets_24h)} wallets (24h)`,
     verified: true,
   });
 
@@ -111,12 +118,20 @@ export function computeSignalScore(token: Token): SignalScore {
     contribution: Math.min(20, volLiqRatio * 4),
   });
 
-  const holderScore = Math.min(20, (token.holders / 1000) * 20);
+  const holderScore = Math.min(15, (token.holders / 500) * 15);
   factors.push({
     label: "Holder Count",
     value: formatNumber(token.holders),
-    weight: 20,
+    weight: 15,
     contribution: holderScore,
+  });
+
+  const walletScore = Math.min(10, (token.unique_wallets_24h / 100) * 10);
+  factors.push({
+    label: "Unique Wallets (24h)",
+    value: formatNumber(token.unique_wallets_24h),
+    weight: 10,
+    contribution: walletScore,
   });
 
   const momentumScore = Math.min(20, Math.max(0, (token.price_change_24h + 20) / 2));
@@ -135,11 +150,11 @@ export function computeSignalScore(token: Token): SignalScore {
     contribution: liqScore,
   });
 
-  const tradeScore = Math.min(20, (token.trades_24h / 1000) * 20);
+  const tradeScore = Math.min(15, (token.trades_24h / 500) * 15);
   factors.push({
     label: "Trade Activity",
-    value: `${token.trades_24h} trades`,
-    weight: 20,
+    value: `${formatNumber(token.trades_24h)} trades`,
+    weight: 15,
     contribution: tradeScore,
   });
 

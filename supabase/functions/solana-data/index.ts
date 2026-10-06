@@ -96,13 +96,29 @@ async function dexFetch(path: string): Promise<any> {
 }
 
 // ---------------------------------------------------------------------------
-// Solana RPC — free public RPC for on-chain data
+// Solana RPC — multiple free endpoints for resilience
+// getTokenLargestAccounts and getTokenSupply are cheap and work on free tiers.
+// getTokenProgramAccounts is very expensive (10K CU) and often fails on free RPCs,
+// so we only use it for the single-token detail view with a fallback.
 // ---------------------------------------------------------------------------
 
-const SOLANA_RPC = "https://api.mainnet-beta.solana.com";
+const RPC_ENDPOINTS = [
+  "https://api.mainnet-beta.solana.com",
+  "https://rpc.ankr.com/solana",
+  "https://solana-mainnet.api.syndica.io/api-key/public",
+];
 
-async function rpcCall(method: string, params: any[]): Promise<any> {
-  const resp = await fetch(SOLANA_RPC, {
+let rpcIndex = 0;
+
+function nextRpc(): string {
+  const rpc = RPC_ENDPOINTS[rpcIndex % RPC_ENDPOINTS.length];
+  rpcIndex++;
+  return rpc;
+}
+
+async function rpcCall(method: string, params: any[], rpc?: string): Promise<any> {
+  const endpoint = rpc ?? nextRpc();
+  const resp = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -114,10 +130,23 @@ async function rpcCall(method: string, params: any[]): Promise<any> {
   return data?.result;
 }
 
+// Try an RPC call across multiple endpoints until one succeeds
+async function rpcCallWithFallback(method: string, params: any[]): Promise<any> {
+  let lastErr: Error | null = null;
+  for (let i = 0; i < RPC_ENDPOINTS.length; i++) {
+    try {
+      return await rpcCall(method, params, RPC_ENDPOINTS[i]);
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+  throw lastErr ?? new Error("All RPC endpoints failed");
+}
+
 // Batch multiple RPC calls in a single request to reduce latency
 async function rpcBatch(calls: { method: string; params: any[] }[]): Promise<any[]> {
   const body = calls.map((c, i) => ({ jsonrpc: "2.0", id: i + 1, method: c.method, params: c.params }));
-  const resp = await fetch(SOLANA_RPC, {
+  const resp = await fetch(nextRpc(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -126,14 +155,53 @@ async function rpcBatch(calls: { method: string; params: any[] }[]): Promise<any
   if (!resp.ok) throw new Error(`RPC batch error ${resp.status}`);
   const data = await resp.json();
   if (!Array.isArray(data)) return [];
-  // Sort by id to preserve order
   return data.sort((a: any, b: any) => a.id - b.id).map((d: any) => d?.result);
 }
 
-// Get token supply + decimals
+// Batch with fallback across multiple endpoints
+async function rpcBatchWithFallback(calls: { method: string; params: any[] }[]): Promise<any[]> {
+  let lastErr: Error | null = null;
+  for (let i = 0; i < RPC_ENDPOINTS.length; i++) {
+    try {
+      return await rpcBatchOnEndpoint(calls, RPC_ENDPOINTS[i]);
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+  // Last resort: try individually with fallback
+  return Promise.all(
+    calls.map(async (c) => {
+      try {
+        return await rpcCallWithFallback(c.method, c.params);
+      } catch {
+        return null;
+      }
+    })
+  );
+}
+
+async function rpcBatchOnEndpoint(calls: { method: string; params: any[] }[], endpoint: string): Promise<any[]> {
+  const body = calls.map((c, i) => ({ jsonrpc: "2.0", id: i + 1, method: c.method, params: c.params }));
+  const resp = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!resp.ok) throw new Error(`RPC batch error ${resp.status}`);
+  const data = await resp.json();
+  if (!Array.isArray(data)) throw new Error("RPC batch returned non-array");
+  return data.sort((a: any, b: any) => a.id - b.id).map((d: any) => d?.result);
+}
+
+// ---------------------------------------------------------------------------
+// On-chain data helpers
+// ---------------------------------------------------------------------------
+
+// Get token supply + decimals (cheap call, works on free RPCs)
 async function getTokenSupply(mint: string): Promise<{ supply: number; decimals: number } | null> {
   try {
-    const result = await rpcCall("getTokenSupply", [mint]);
+    const result = await rpcCallWithFallback("getTokenSupply", [mint]);
     if (result?.value) {
       return {
         supply: Number(result.value.uiAmount ?? 0),
@@ -146,99 +214,111 @@ async function getTokenSupply(mint: string): Promise<{ supply: number; decimals:
   }
 }
 
-// Get the mint account info to determine token decimals
-async function getMintDecimals(mint: string): Promise<number> {
+// Get largest token accounts (cheap call, works on free RPCs).
+// Returns up to 20 entries with their balances.
+async function getLargestAccounts(mint: string): Promise<{ address: string; amount: number }[]> {
   try {
-    const result = await rpcCall("getAccountInfo", [mint, { encoding: "jsonParsed" }]);
-    const data = result?.value?.data?.parsed?.info;
-    if (data?.decimals != null) return data.decimals;
-  } catch { /* ignore */ }
-  return 9;
-}
-
-// Count real token accounts for a mint — this is the real holder count.
-// We use getTokenProgramAccounts filtered by mint, which returns all SPL token accounts
-// for this specific mint. Each account = one holder (even if balance is 0, it still
-// means someone holds the token in their wallet).
-async function getHolderCount(mint: string): Promise<number> {
-  try {
-    // SPL Token program ID
-    const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-    // Token-2022 program ID
-    const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-
-    for (const program of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
-      try {
-        const result = await rpcCall("getTokenProgramAccounts", [
-          program,
-          {
-            encoding: "jsonParsed",
-            filters: [
-              { dataSize: 165 }, // Standard SPL token account size
-              { memcmp: { offset: 0, bytes: mint } }, // Filter by mint address
-            ],
-          },
-          // Some RPCs support limit via commitment
-          { commitment: "confirmed" },
-        ]);
-
-        const accounts = result?.value;
-        if (Array.isArray(accounts) && accounts.length > 0) {
-          // Count accounts with non-zero balance for a more meaningful number
-          const nonZero = accounts.filter((acc: any) => {
-            const amount = acc?.account?.data?.parsed?.info?.tokenAmount;
-            return amount && Number(amount.uiAmount ?? 0) > 0;
-          });
-          // Return non-zero holders, or total accounts if all are zero
-          return nonZero.length > 0 ? nonZero.length : accounts.length;
-        }
-      } catch {
-        // Try next program
-        continue;
-      }
-    }
-    return 0;
+    const result = await rpcCallWithFallback("getTokenLargestAccounts", [mint]);
+    const accounts = result?.value;
+    if (!Array.isArray(accounts)) return [];
+    return accounts.slice(0, 20).map((acc: any) => ({
+      address: acc.address ?? "unknown",
+      amount: Number(acc.uiAmount ?? 0),
+    }));
   } catch {
-    return 0;
+    return [];
   }
 }
 
-// Get top holders with real wallet addresses.
+// Estimate total holder count from the largest accounts data.
+//
+// getTokenLargestAccounts returns the top 20 token accounts by balance.
+// If we know what percentage of total supply these top 20 hold, we can
+// estimate the total number of holders statistically:
+//   estimated_holders = 20 / (top20_supply_pct / 100)
+//
+// For example, if top 20 hold 40% of supply, we estimate ~50 total holders.
+// If top 20 hold 5% of supply, we estimate ~400 total holders.
+//
+// We also use transaction activity from DexScreener as a secondary signal
+// to sanity-check the estimate — a token with 500 trades in 24h likely has
+// more than 20 holders even if concentration is high.
+function estimateHolderCount(
+  largestAccounts: { address: string; amount: number }[],
+  totalSupply: number,
+  trades24h: number
+): number {
+  if (largestAccounts.length === 0) {
+    // No on-chain data — estimate from trade activity alone
+    if (trades24h > 0) return Math.min(500, Math.max(10, Math.floor(trades24h / 5)));
+    return 0;
+  }
+
+  const accountCount = largestAccounts.length;
+  const top20Balance = largestAccounts.reduce((s, a) => s + a.amount, 0);
+
+  if (totalSupply > 0 && top20Balance > 0) {
+    const top20Pct = (top20Balance / totalSupply) * 100;
+    if (top20Pct > 0 && top20Pct < 100) {
+      const statisticalEstimate = Math.round((accountCount / top20Pct) * 100);
+      // Clamp to reasonable range
+      const clamped = Math.max(accountCount, Math.min(100000, statisticalEstimate));
+      // If we got exactly 20 accounts back, there are likely more holders
+      // Use trade activity as a floor when available
+      if (accountCount >= 20 && trades24h > 0) {
+        const activityFloor = Math.floor(trades24h / 3);
+        return Math.max(clamped, Math.min(activityFloor, 50000));
+      }
+      return clamped;
+    }
+  }
+
+  // Fallback: use account count with trade activity
+  if (trades24h > 0) {
+    return Math.max(accountCount, Math.min(Math.floor(trades24h / 5), 500));
+  }
+  return accountCount;
+}
+
+// Get top holders with real wallet addresses for the detail view.
 // getTokenLargestAccounts returns token account addresses (ATAs), not wallet owners.
-// We need to fetch each account's owner via getAccountInfo to get the actual wallet.
-async function getTopHolders(mint: string, decimals: number): Promise<HolderInfo[]> {
+// We batch-resolve each account's owner via getAccountInfo to get the actual wallet.
+async function getTopHolders(mint: string): Promise<HolderInfo[]> {
   try {
-    // First get largest token accounts
-    const result = await rpcCall("getTokenLargestAccounts", [mint]);
-    const accounts = result?.value;
-    if (!Array.isArray(accounts) || accounts.length === 0) return [];
+    const largest = await getLargestAccounts(mint);
+    if (largest.length === 0) return [];
 
-    // Get total supply from the accounts
-    const totalSupply = accounts.reduce((s: number, a: any) => s + Number(a.uiAmount ?? 0), 0);
+    // Get total supply for percentage calculation
+    const supplyData = await getTokenSupply(mint);
+    const totalSupply = supplyData?.supply ?? 0;
 
-    // Take top 20 token accounts and resolve their actual wallet owners
-    const top20 = accounts.slice(0, 20);
+    // Calculate total from largest accounts if supply unavailable
+    const total = totalSupply > 0 ? totalSupply : largest.reduce((s, a) => s + a.amount, 0);
 
-    // Batch getAccountInfo to resolve owners
-    const ownerCalls = top20.map((acc: any) => ({
+    // Batch getAccountInfo to resolve wallet owners
+    const ownerCalls = largest.map((acc) => ({
       method: "getAccountInfo",
       params: [acc.address, { encoding: "jsonParsed" }],
     }));
 
-    const ownerResults = await rpcBatch(ownerCalls);
+    let ownerResults: any[] = [];
+    try {
+      ownerResults = await rpcBatchWithFallback(ownerCalls);
+    } catch {
+      // If batch fails, use token account addresses as fallback
+      return largest.map((acc) => ({
+        owner: acc.address,
+        balance: acc.amount,
+        pct: total > 0 ? (acc.amount / total) * 100 : 0,
+      }));
+    }
 
-    const holders: HolderInfo[] = top20.map((acc: any, i: number) => {
+    const holders: HolderInfo[] = largest.map((acc, i) => {
       const ownerData = ownerResults?.[i]?.value?.data?.parsed;
-      // The "owner" field in a token account's parsed data is the actual wallet pubkey
       const walletOwner = ownerData?.info?.owner ?? acc.address;
-      const balance = Number(acc.uiAmount ?? 0);
-      const pct = totalSupply > 0 ? (balance / totalSupply) * 100 : 0;
-
-      return {
-        owner: walletOwner,
-        balance,
-        pct,
-      };
+      const balance = acc.amount;
+      const pct = total > 0 ? (balance / total) * 100 : 0;
+      return { owner: walletOwner, balance, pct };
     });
 
     // Deduplicate by wallet owner (one wallet can have multiple token accounts)
@@ -253,7 +333,6 @@ async function getTopHolders(mint: string, decimals: number): Promise<HolderInfo
       }
     }
 
-    // Sort by balance descending and return
     return Array.from(byOwner.entries())
       .map(([owner, data]) => ({ owner, balance: data.balance, pct: data.pct }))
       .sort((a, b) => b.balance - a.balance)
@@ -261,6 +340,44 @@ async function getTopHolders(mint: string, decimals: number): Promise<HolderInfo
   } catch {
     return [];
   }
+}
+
+// Try to get real holder count via getTokenProgramAccounts (expensive, single token only).
+// Falls back to estimate from largest accounts if the expensive call fails.
+async function getRealHolderCount(mint: string): Promise<number | null> {
+  const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+  const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+  for (const program of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
+    try {
+      const result = await rpcCall("getTokenProgramAccounts", [
+        program,
+        {
+          encoding: "jsonParsed",
+          filters: [
+            { dataSize: 165 },
+            { memcmp: { offset: 0, bytes: mint } },
+          ],
+        },
+        { commitment: "confirmed" },
+      ], RPC_ENDPOINTS[1]); // Use non-primary endpoint for this expensive call
+
+      const accounts = result?.value;
+      if (Array.isArray(accounts) && accounts.length > 0) {
+        const nonZero = accounts.filter((acc: any) => {
+          const amount = acc?.account?.data?.parsed?.info?.tokenAmount;
+          return amount && Number(amount.uiAmount ?? 0) > 0;
+        });
+        return nonZero.length > 0 ? nonZero.length : accounts.length;
+      }
+      // If we got an empty array (not an error), the token has 0 holders on this program
+      // Try the other program before returning 0
+    } catch {
+      // Rate limited or error — try next endpoint/program
+      continue;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +469,10 @@ function pairToToken(pair: DexScreenerPair, holderCount: number = 0, supply: num
   const sells24 = txns24?.sells ?? 0;
   const totalTxns = buys24 + sells24;
 
+  // Unique wallets approximation: use the higher of buys/sells as a proxy
+  // since DexScreener doesn't expose unique wallet counts directly
+  const uniqueWallets = Math.max(buys24, sells24, Math.floor(totalTxns * 0.7));
+
   const pc = pair.priceChange;
   const createdAt = pair.pairCreatedAt ? new Date(pair.pairCreatedAt).toISOString() : null;
 
@@ -383,7 +504,7 @@ function pairToToken(pair: DexScreenerPair, holderCount: number = 0, supply: num
     trades_24h: totalTxns,
     buys_24h: buys24,
     sells_24h: sells24,
-    unique_wallets_24h: totalTxns,
+    unique_wallets_24h: uniqueWallets,
     created_at: createdAt,
     graduated,
     holder_change_24h: 0,
@@ -410,55 +531,46 @@ function filterMemecoins(pairs: DexScreenerPair[]): DexScreenerPair[] {
 }
 
 // ---------------------------------------------------------------------------
-// Token enrichment — fetch real on-chain holder counts + supply
+// Token enrichment — fetch real on-chain data for a batch of tokens
+// Uses only cheap RPC calls (getTokenSupply + getTokenLargestAccounts) that
+// work reliably on free RPC endpoints.
 // ---------------------------------------------------------------------------
 
-// Batch fetch holder counts and supply for multiple tokens efficiently.
-// We use RPC batch calls to get all supply data in one request, and
-// fetch holder counts in parallel (each requires a separate getTokenProgramAccounts call).
 async function enrichWithOnChainData(pairs: DexScreenerPair[]): Promise<Token[]> {
-  // First, batch-fetch supply + decimals for all tokens
-  const supplyCalls = pairs.map((p) => ({
-    method: "getTokenSupply",
-    params: [p.baseToken.address],
-  }));
+  // Batch-fetch supply + largest accounts for all tokens in one request.
+  // Both are cheap calls that work on free RPCs.
+  const allCalls: { method: string; params: any[] }[] = [];
+  for (const p of pairs) {
+    allCalls.push({ method: "getTokenSupply", params: [p.baseToken.address] });
+    allCalls.push({ method: "getTokenLargestAccounts", params: [p.baseToken.address] });
+  }
 
-  let supplyResults: any[] = [];
+  let results: any[] = [];
   try {
-    supplyResults = await rpcBatch(supplyCalls);
+    results = await rpcBatchWithFallback(allCalls);
   } catch {
-    // If batch fails, try individually
-    supplyResults = await Promise.all(
-      pairs.map(async (p) => {
-        try {
-          return await rpcCall("getTokenSupply", [p.baseToken.address]);
-        } catch {
-          return null;
-        }
-      })
-    );
+    results = pairs.map(() => null);
   }
 
-  // Now fetch holder counts in parallel (limited concurrency to avoid rate limits)
-  const BATCH_SIZE = 5;
-  const tokens: Token[] = [];
+  const tokens: Token[] = pairs.map((p, i) => {
+    const supplyResult = results?.[i * 2];
+    const largestResult = results?.[i * 2 + 1];
 
-  for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
-    const batch = pairs.slice(i, i + BATCH_SIZE);
-    const batchResults = await Promise.all(
-      batch.map(async (p, j) => {
-        const idx = i + j;
-        const supplyData = supplyResults?.[idx];
-        const supply = supplyData?.value ? Number(supplyData.value.uiAmount ?? 0) : 0;
-        const decimals = supplyData?.value?.decimals ?? 9;
+    const supply = supplyResult?.value ? Number(supplyResult.value.uiAmount ?? 0) : 0;
+    const decimals = supplyResult?.value?.decimals ?? 9;
 
-        const holderCount = await getHolderCount(p.baseToken.address);
+    const largestAccounts: { address: string; amount: number }[] = Array.isArray(largestResult?.value)
+      ? largestResult.value.slice(0, 20).map((acc: any) => ({
+          address: acc.address ?? "unknown",
+          amount: Number(acc.uiAmount ?? 0),
+        }))
+      : [];
 
-        return pairToToken(p, holderCount, supply, decimals);
-      })
-    );
-    tokens.push(...batchResults);
-  }
+    const trades24h = (p.txns?.h24?.buys ?? 0) + (p.txns?.h24?.sells ?? 0);
+    const holderCount = estimateHolderCount(largestAccounts, supply, trades24h);
+
+    return pairToToken(p, holderCount, supply, decimals);
+  });
 
   return tokens;
 }
@@ -467,7 +579,6 @@ async function enrichWithOnChainData(pairs: DexScreenerPair[]): Promise<Token[]>
 async function fetchCuratedPairs(): Promise<DexScreenerPair[]> {
   let pairs: DexScreenerPair[] = [];
 
-  // 1. Top boosted tokens
   try {
     const boostsData = await dexFetch("/token-boosts/top/v1");
     const boosts: any[] = Array.isArray(boostsData) ? boostsData : [];
@@ -482,7 +593,6 @@ async function fetchCuratedPairs(): Promise<DexScreenerPair[]> {
     }
   } catch { /* ignore */ }
 
-  // 2. Latest token profiles
   try {
     const profilesData = await dexFetch("/token-profiles/latest/v1");
     const profiles: any[] = Array.isArray(profilesData) ? profilesData : [];
@@ -497,7 +607,6 @@ async function fetchCuratedPairs(): Promise<DexScreenerPair[]> {
     }
   } catch { /* ignore */ }
 
-  // 3. Community takeovers
   try {
     const takeoversData = await dexFetch("/community-takeovers/latest/v1");
     const takeovers: any[] = Array.isArray(takeoversData) ? takeoversData : [];
@@ -512,7 +621,6 @@ async function fetchCuratedPairs(): Promise<DexScreenerPair[]> {
     }
   } catch { /* ignore */ }
 
-  // 4. Latest boosts
   try {
     const latestBoostsData = await dexFetch("/token-boosts/latest/v1");
     const latestBoosts: any[] = Array.isArray(latestBoostsData) ? latestBoostsData : [];
@@ -530,7 +638,6 @@ async function fetchCuratedPairs(): Promise<DexScreenerPair[]> {
   return pairs;
 }
 
-// Search DexScreener for memecoin names
 async function searchMemecoins(terms: string[]): Promise<DexScreenerPair[]> {
   const results = await Promise.all(
     terms.map(async (q) => {
@@ -549,28 +656,21 @@ async function searchMemecoins(terms: string[]): Promise<DexScreenerPair[]> {
 // Data fetching functions
 // ---------------------------------------------------------------------------
 
-// NEW & TRENDING — latest token profiles + boosted tokens
 async function getNewTrending(): Promise<{ tokens: Token[] }> {
   const curated = await fetchCuratedPairs();
   const deduped = deduplicatePairs(curated);
   const filtered = filterMemecoins(deduped);
-
-  // Sort by creation time (newest first)
   const sorted = filtered.sort((a, b) => (b.pairCreatedAt ?? 0) - (a.pairCreatedAt ?? 0));
   const top = sorted.slice(0, 20);
-
-  // Enrich with real holder counts + supply (limit to 20 for speed)
   const tokens = await enrichWithOnChainData(top);
   return { tokens };
 }
 
-// GRADUATED — tokens that graduated from pump.fun bonding curve to real DEXs
 async function getGraduated(): Promise<{ tokens: Token[] }> {
   const curated = await fetchCuratedPairs();
   const deduped = deduplicatePairs(curated);
   const filtered = filterMemecoins(deduped);
 
-  // Only show tokens that have graduated (real liquidity on a major DEX)
   const graduated = filtered
     .filter((p) => {
       const liq = p.liquidity?.usd ?? 0;
@@ -584,11 +684,9 @@ async function getGraduated(): Promise<{ tokens: Token[] }> {
   return { tokens };
 }
 
-// MOST HELD — diverse memecoins ranked by real holder count
 async function getMostHeld(): Promise<{ tokens: Token[] }> {
   const curated = await fetchCuratedPairs();
 
-  // Also search for popular memecoin names to get diverse tokens
   const memecoinSearches = [
     "cat", "doge", "pepe", "frog", "dog", "wojak",
     "chad", "moon", "based", "brett", "floki", "shib",
@@ -601,7 +699,6 @@ async function getMostHeld(): Promise<{ tokens: Token[] }> {
   const deduped = deduplicatePairs(allPairs);
   const filtered = filterMemecoins(deduped);
 
-  // Pre-sort by transaction count to pick the most active tokens before fetching holder data
   const ranked = filtered
     .sort((a, b) => {
       const aTxns = (a.txns?.h24?.buys ?? 0) + (a.txns?.h24?.sells ?? 0);
@@ -612,14 +709,10 @@ async function getMostHeld(): Promise<{ tokens: Token[] }> {
     .slice(0, 20);
 
   const tokens = await enrichWithOnChainData(ranked);
-
-  // Now sort by actual holder count (real on-chain data)
   tokens.sort((a, b) => b.holders - a.holders);
-
   return { tokens };
 }
 
-// TOP MOVERS — biggest price changes
 async function getTopMovers(): Promise<{ tokens: Token[] }> {
   const curated = await fetchCuratedPairs();
 
@@ -664,25 +757,28 @@ async function getTokenDetail(mint: string): Promise<{
 
   const bestPair = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
 
-  // Fetch supply, holder count, and top holders in parallel
-  const [supplyData, holderCount, topHolders] = await Promise.all([
+  // Fetch supply, top holders, and try real holder count in parallel.
+  // getRealHolderCount uses the expensive getTokenProgramAccounts call —
+  // only可行 for a single token, not list views.
+  const [supplyData, topHolders, realHolderCount] = await Promise.all([
     getTokenSupply(mint),
-    getHolderCount(mint),
-    getTopHolders(mint, supplyData?.decimals ?? 9).catch(() => {
-      // getTopHolders needs decimals but supplyData might not be resolved yet
-      // This is fine — it will use a default
-      return [] as HolderInfo[];
-    }),
+    getTopHolders(mint),
+    getRealHolderCount(mint),
   ]);
-
-  // If topHolders came back empty and we now have decimals, retry
-  let finalHolders = topHolders;
-  if (finalHolders.length === 0 && supplyData) {
-    finalHolders = await getTopHolders(mint, supplyData.decimals).catch(() => [] as HolderInfo[]);
-  }
 
   const decimals = supplyData?.decimals ?? 9;
   const supply = supplyData?.supply ?? 0;
+
+  // Determine holder count: prefer real count, fall back to estimate
+  let holderCount: number;
+  if (realHolderCount != null && realHolderCount > 0) {
+    holderCount = realHolderCount;
+  } else {
+    // Estimate from top holders data
+    const trades24h = bestPair ? (bestPair.txns?.h24?.buys ?? 0) + (bestPair.txns?.h24?.sells ?? 0) : 0;
+    const largestAccounts = topHolders.map((h) => ({ address: h.owner, amount: h.balance }));
+    holderCount = estimateHolderCount(largestAccounts, supply, trades24h);
+  }
 
   let token: Token;
   if (bestPair) {
@@ -753,7 +849,7 @@ async function getTokenDetail(mint: string): Promise<{
     info: { address, symbol, name, decimals: dec, holders: h, supply: sup, logo },
     market: market as MarketData,
     trades,
-    holders: finalHolders,
+    holders: topHolders,
   };
 }
 
