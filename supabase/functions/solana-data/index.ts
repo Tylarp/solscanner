@@ -96,10 +96,116 @@ async function dexFetch(path: string): Promise<any> {
 }
 
 // ---------------------------------------------------------------------------
-// Solana RPC — multiple free endpoints for resilience
-// getTokenLargestAccounts and getTokenSupply are cheap and work on free tiers.
-// getTokenProgramAccounts is very expensive (10K CU) and often fails on free RPCs,
-// so we only use it for the single-token detail view with a fallback.
+// Jupiter API — requires API key, used for real-time prices and swap quotes
+// ---------------------------------------------------------------------------
+
+const JUPITER_API = "https://api.jup.ag";
+const JUPITER_KEY = "jup_978c3424d25296ab543f788e363eaf52d3e6dd16b7967589a5c22b943024e06c";
+
+// SOL mint address — used as the quote currency for swap quotes
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+// USDC mint address
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+// Fetch real-time USD price for a token from Jupiter Price API v3
+async function getJupiterPrice(mint: string): Promise<number | null> {
+  try {
+    const resp = await fetch(
+      `${JUPITER_API}/price/v3?ids=${mint}`,
+      {
+        headers: { "x-api-key": JUPITER_KEY },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    // v3 returns { data: { "<mint>": { id, price } } }
+    const price = data?.data?.[mint]?.price;
+    return price ? Number(price) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fetch swap quote from Jupiter — shows how much output you get for a given input amount
+// Returns price impact, routes, and expected output amount
+async function getJupiterSwapQuote(
+  inputMint: string,
+  outputMint: string,
+  amount: string,
+  slippageBps: number = 50
+): Promise<SwapQuote | null> {
+  try {
+    const params = new URLSearchParams({
+      inputMint,
+      outputMint,
+      amount,
+      slippageBps: String(slippageBps),
+      restrictIntermediateTokens: "true",
+    });
+
+    const resp = await fetch(
+      `${JUPITER_API}/swap/v1/quote?${params}`,
+      {
+        headers: { "x-api-key": JUPITER_KEY },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (!data || !data.outAmount) return null;
+
+    return {
+      inputMint,
+      outputMint,
+      inAmount: data.inAmount,
+      outAmount: data.outAmount,
+      otherAmountThreshold: data.otherAmountThreshold,
+      swapMode: data.swapMode,
+      slippageBps: data.slippageBps,
+      priceImpactPct: data.priceImpactPct ? Number(data.priceImpactPct) * 100 : 0,
+      routePlan: (data.routePlan ?? []).slice(0, 5).map((r: any) => ({
+        swapInfo: {
+          ammKey: r.swapInfo?.ammKey ?? "",
+          label: r.swapInfo?.label ?? "",
+          inputMint: r.swapInfo?.inputMint ?? "",
+          outputMint: r.swapInfo?.outputMint ?? "",
+          inAmount: r.swapInfo?.inAmount ?? "",
+          outAmount: r.swapInfo?.outAmount ?? "",
+          feeAmount: r.swapInfo?.feeAmount ?? "",
+          feeMint: r.swapInfo?.feeMint ?? "",
+        },
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+interface SwapQuote {
+  inputMint: string;
+  outputMint: string;
+  inAmount: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  swapMode: string;
+  slippageBps: number;
+  priceImpactPct: number;
+  routePlan: { swapInfo: {
+    ammKey: string;
+    label: string;
+    inputMint: string;
+    outputMint: string;
+    inAmount: string;
+    outAmount: string;
+    feeAmount: string;
+    feeMint: string;
+  } }[];
+}
+
+// ---------------------------------------------------------------------------
+// Solana RPC — used ONLY for the single-token detail page.
+// List views use DexScreener data exclusively to avoid timeouts.
 // ---------------------------------------------------------------------------
 
 const RPC_ENDPOINTS = [
@@ -108,34 +214,20 @@ const RPC_ENDPOINTS = [
   "https://solana-mainnet.api.syndica.io/api-key/public",
 ];
 
-let rpcIndex = 0;
-
-function nextRpc(): string {
-  const rpc = RPC_ENDPOINTS[rpcIndex % RPC_ENDPOINTS.length];
-  rpcIndex++;
-  return rpc;
-}
-
-async function rpcCall(method: string, params: any[], rpc?: string): Promise<any> {
-  const endpoint = rpc ?? nextRpc();
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!resp.ok) throw new Error(`RPC error ${resp.status}`);
-  const data = await resp.json();
-  if (data?.error) throw new Error(data.error.message);
-  return data?.result;
-}
-
-// Try an RPC call across multiple endpoints until one succeeds
 async function rpcCallWithFallback(method: string, params: any[]): Promise<any> {
   let lastErr: Error | null = null;
-  for (let i = 0; i < RPC_ENDPOINTS.length; i++) {
+  for (const endpoint of RPC_ENDPOINTS) {
     try {
-      return await rpcCall(method, params, RPC_ENDPOINTS[i]);
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) throw new Error(`RPC error ${resp.status}`);
+      const data = await resp.json();
+      if (data?.error) throw new Error(data.error.message);
+      return data?.result;
     } catch (e) {
       lastErr = e instanceof Error ? e : new Error(String(e));
     }
@@ -143,32 +235,26 @@ async function rpcCallWithFallback(method: string, params: any[]): Promise<any> 
   throw lastErr ?? new Error("All RPC endpoints failed");
 }
 
-// Batch multiple RPC calls in a single request to reduce latency
-async function rpcBatch(calls: { method: string; params: any[] }[]): Promise<any[]> {
-  const body = calls.map((c, i) => ({ jsonrpc: "2.0", id: i + 1, method: c.method, params: c.params }));
-  const resp = await fetch(nextRpc(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(12000),
-  });
-  if (!resp.ok) throw new Error(`RPC batch error ${resp.status}`);
-  const data = await resp.json();
-  if (!Array.isArray(data)) return [];
-  return data.sort((a: any, b: any) => a.id - b.id).map((d: any) => d?.result);
-}
-
-// Batch with fallback across multiple endpoints
 async function rpcBatchWithFallback(calls: { method: string; params: any[] }[]): Promise<any[]> {
   let lastErr: Error | null = null;
-  for (let i = 0; i < RPC_ENDPOINTS.length; i++) {
+  for (const endpoint of RPC_ENDPOINTS) {
     try {
-      return await rpcBatchOnEndpoint(calls, RPC_ENDPOINTS[i]);
+      const body = calls.map((c, i) => ({ jsonrpc: "2.0", id: i + 1, method: c.method, params: c.params }));
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!resp.ok) throw new Error(`RPC batch error ${resp.status}`);
+      const data = await resp.json();
+      if (!Array.isArray(data)) throw new Error("RPC batch returned non-array");
+      return data.sort((a: any, b: any) => a.id - b.id).map((d: any) => d?.result);
     } catch (e) {
       lastErr = e instanceof Error ? e : new Error(String(e));
     }
   }
-  // Last resort: try individually with fallback
+  // Last resort: try individually
   return Promise.all(
     calls.map(async (c) => {
       try {
@@ -180,25 +266,10 @@ async function rpcBatchWithFallback(calls: { method: string; params: any[] }[]):
   );
 }
 
-async function rpcBatchOnEndpoint(calls: { method: string; params: any[] }[], endpoint: string): Promise<any[]> {
-  const body = calls.map((c, i) => ({ jsonrpc: "2.0", id: i + 1, method: c.method, params: c.params }));
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(12000),
-  });
-  if (!resp.ok) throw new Error(`RPC batch error ${resp.status}`);
-  const data = await resp.json();
-  if (!Array.isArray(data)) throw new Error("RPC batch returned non-array");
-  return data.sort((a: any, b: any) => a.id - b.id).map((d: any) => d?.result);
-}
-
 // ---------------------------------------------------------------------------
-// On-chain data helpers
+// On-chain data helpers (detail page only)
 // ---------------------------------------------------------------------------
 
-// Get token supply + decimals (cheap call, works on free RPCs)
 async function getTokenSupply(mint: string): Promise<{ supply: number; decimals: number } | null> {
   try {
     const result = await rpcCallWithFallback("getTokenSupply", [mint]);
@@ -214,8 +285,6 @@ async function getTokenSupply(mint: string): Promise<{ supply: number; decimals:
   }
 }
 
-// Get largest token accounts (cheap call, works on free RPCs).
-// Returns up to 20 entries with their balances.
 async function getLargestAccounts(mint: string): Promise<{ address: string; amount: number }[]> {
   try {
     const result = await rpcCallWithFallback("getTokenLargestAccounts", [mint]);
@@ -230,154 +299,80 @@ async function getLargestAccounts(mint: string): Promise<{ address: string; amou
   }
 }
 
-// Estimate total holder count from the largest accounts data.
+// ---------------------------------------------------------------------------
+// Holder count estimation — uses DexScreener data only, no RPC calls.
 //
-// getTokenLargestAccounts returns the top 20 token accounts by balance.
-// If we know what percentage of total supply these top 20 hold, we can
-// estimate the total number of holders statistically:
-//   estimated_holders = 20 / (top20_supply_pct / 100)
-//
-// For example, if top 20 hold 40% of supply, we estimate ~50 total holders.
-// If top 20 hold 5% of supply, we estimate ~400 total holders.
-//
-// We also use transaction activity from DexScreener as a secondary signal
-// to sanity-check the estimate — a token with 500 trades in 24h likely has
-// more than 20 holders even if concentration is high.
+// DexScreener gives us buy/sell transaction counts per timeframe. We use these
+// to estimate holder count:
+// - unique_wallets_24h = max(buys, sells) is a proxy for unique active wallets
+// - total unique wallets over the token's lifetime is much higher than 24h active
+// - We scale the 24h active wallets by the token's age to estimate total holders
+// - For very new tokens, the 24h activity is a good proxy since most holders are recent
+// ---------------------------------------------------------------------------
+
 function estimateHolderCount(
-  largestAccounts: { address: string; amount: number }[],
-  totalSupply: number,
-  trades24h: number
+  trades24h: number,
+  buys24h: number,
+  sells24h: number,
+  createdAt: string | null,
+  marketCap: number,
+  liquidity: number
 ): number {
-  if (largestAccounts.length === 0) {
-    // No on-chain data — estimate from trade activity alone
-    if (trades24h > 0) return Math.min(500, Math.max(10, Math.floor(trades24h / 5)));
+  const uniqueWallets24h = Math.max(buys24h, sells24h, Math.floor(trades24h * 0.7));
+
+  if (trades24h === 0 && uniqueWallets24h === 0) {
+    // No trade activity — estimate from market cap / liquidity as a last resort
+    if (marketCap > 1000000) return Math.max(500, Math.floor(marketCap / 10000));
+    if (marketCap > 100000) return Math.max(50, Math.floor(marketCap / 5000));
+    if (liquidity > 50000) return Math.max(30, Math.floor(liquidity / 5000));
     return 0;
   }
 
-  const accountCount = largestAccounts.length;
-  const top20Balance = largestAccounts.reduce((s, a) => s + a.amount, 0);
+  // Base estimate from 24h unique wallets
+  let estimate = uniqueWallets24h;
 
-  if (totalSupply > 0 && top20Balance > 0) {
-    const top20Pct = (top20Balance / totalSupply) * 100;
-    if (top20Pct > 0 && top20Pct < 100) {
-      const statisticalEstimate = Math.round((accountCount / top20Pct) * 100);
-      // Clamp to reasonable range
-      const clamped = Math.max(accountCount, Math.min(100000, statisticalEstimate));
-      // If we got exactly 20 accounts back, there are likely more holders
-      // Use trade activity as a floor when available
-      if (accountCount >= 20 && trades24h > 0) {
-        const activityFloor = Math.floor(trades24h / 3);
-        return Math.max(clamped, Math.min(activityFloor, 50000));
-      }
-      return clamped;
+  // Scale up based on token age — older tokens have accumulated more holders
+  // than their 24h active count suggests
+  if (createdAt) {
+    const ageHours = (Date.now() - new Date(createdAt).getTime()) / 3_600_000;
+    if (ageHours < 24) {
+      // Very new token — most holders are active in 24h, minimal scaling
+      estimate = Math.round(uniqueWallets24h * 1.5);
+    } else if (ageHours < 168) {
+      // 1-7 days old — moderate scaling
+      const ageDays = ageHours / 24;
+      estimate = Math.round(uniqueWallets24h * (1.5 + ageDays * 0.3));
+    } else {
+      // Older than a week — many holders may not be active in 24h
+      const ageDays = ageHours / 24;
+      // Scale up but cap the multiplier at 10x
+      const multiplier = Math.min(10, 1.5 + ageDays * 0.5);
+      estimate = Math.round(uniqueWallets24h * multiplier);
     }
+  } else {
+    // Unknown age — use a conservative 3x multiplier
+    estimate = Math.round(uniqueWallets24h * 3);
   }
 
-  // Fallback: use account count with trade activity
-  if (trades24h > 0) {
-    return Math.max(accountCount, Math.min(Math.floor(trades24h / 5), 500));
+  // Market cap also correlates with holder count — use as a floor
+  if (marketCap > 0) {
+    const mcFloor = Math.floor(marketCap / 5000);
+    estimate = Math.max(estimate, Math.min(mcFloor, estimate * 5));
   }
-  return accountCount;
+
+  // Ensure minimum of the 24h active wallets
+  estimate = Math.max(estimate, uniqueWallets24h);
+
+  // Clamp to reasonable range
+  return Math.max(1, Math.min(100000, estimate));
 }
 
-// Get top holders with real wallet addresses for the detail view.
-// getTokenLargestAccounts returns token account addresses (ATAs), not wallet owners.
-// We batch-resolve each account's owner via getAccountInfo to get the actual wallet.
-async function getTopHolders(mint: string): Promise<HolderInfo[]> {
-  try {
-    const largest = await getLargestAccounts(mint);
-    if (largest.length === 0) return [];
-
-    // Get total supply for percentage calculation
-    const supplyData = await getTokenSupply(mint);
-    const totalSupply = supplyData?.supply ?? 0;
-
-    // Calculate total from largest accounts if supply unavailable
-    const total = totalSupply > 0 ? totalSupply : largest.reduce((s, a) => s + a.amount, 0);
-
-    // Batch getAccountInfo to resolve wallet owners
-    const ownerCalls = largest.map((acc) => ({
-      method: "getAccountInfo",
-      params: [acc.address, { encoding: "jsonParsed" }],
-    }));
-
-    let ownerResults: any[] = [];
-    try {
-      ownerResults = await rpcBatchWithFallback(ownerCalls);
-    } catch {
-      // If batch fails, use token account addresses as fallback
-      return largest.map((acc) => ({
-        owner: acc.address,
-        balance: acc.amount,
-        pct: total > 0 ? (acc.amount / total) * 100 : 0,
-      }));
-    }
-
-    const holders: HolderInfo[] = largest.map((acc, i) => {
-      const ownerData = ownerResults?.[i]?.value?.data?.parsed;
-      const walletOwner = ownerData?.info?.owner ?? acc.address;
-      const balance = acc.amount;
-      const pct = total > 0 ? (balance / total) * 100 : 0;
-      return { owner: walletOwner, balance, pct };
-    });
-
-    // Deduplicate by wallet owner (one wallet can have multiple token accounts)
-    const byOwner = new Map<string, { balance: number; pct: number }>();
-    for (const h of holders) {
-      const existing = byOwner.get(h.owner);
-      if (existing) {
-        existing.balance += h.balance;
-        existing.pct += h.pct;
-      } else {
-        byOwner.set(h.owner, { balance: h.balance, pct: h.pct });
-      }
-    }
-
-    return Array.from(byOwner.entries())
-      .map(([owner, data]) => ({ owner, balance: data.balance, pct: data.pct }))
-      .sort((a, b) => b.balance - a.balance)
-      .slice(0, 20);
-  } catch {
-    return [];
+// Estimate supply from market cap and price (no RPC call needed)
+function estimateSupply(marketCap: number, price: number): number {
+  if (price > 0 && marketCap > 0) {
+    return Math.round(marketCap / price);
   }
-}
-
-// Try to get real holder count via getTokenProgramAccounts (expensive, single token only).
-// Falls back to estimate from largest accounts if the expensive call fails.
-async function getRealHolderCount(mint: string): Promise<number | null> {
-  const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-  const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-
-  for (const program of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
-    try {
-      const result = await rpcCall("getTokenProgramAccounts", [
-        program,
-        {
-          encoding: "jsonParsed",
-          filters: [
-            { dataSize: 165 },
-            { memcmp: { offset: 0, bytes: mint } },
-          ],
-        },
-        { commitment: "confirmed" },
-      ], RPC_ENDPOINTS[1]); // Use non-primary endpoint for this expensive call
-
-      const accounts = result?.value;
-      if (Array.isArray(accounts) && accounts.length > 0) {
-        const nonZero = accounts.filter((acc: any) => {
-          const amount = acc?.account?.data?.parsed?.info?.tokenAmount;
-          return amount && Number(amount.uiAmount ?? 0) > 0;
-        });
-        return nonZero.length > 0 ? nonZero.length : accounts.length;
-      }
-      // If we got an empty array (not an error), the token has 0 holders on this program
-      // Try the other program before returning 0
-    } catch {
-      // Rate limited or error — try next endpoint/program
-      continue;
-    }
-  }
-  return null;
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,10 +446,10 @@ function isMemecoin(pair: DexScreenerPair): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Transform DexScreener pair → our Token model
+// Transform DexScreener pair → our Token model (DexScreener data only, no RPC)
 // ---------------------------------------------------------------------------
 
-function pairToToken(pair: DexScreenerPair, holderCount: number = 0, supply: number = 0, decimals: number = 9): Token {
+function pairToToken(pair: DexScreenerPair): Token {
   const addr = pair.baseToken.address;
   const price = parseFloat(pair.priceUsd ?? "0") || 0;
   const liq = pair.liquidity?.usd ?? 0;
@@ -469,8 +464,6 @@ function pairToToken(pair: DexScreenerPair, holderCount: number = 0, supply: num
   const sells24 = txns24?.sells ?? 0;
   const totalTxns = buys24 + sells24;
 
-  // Unique wallets approximation: use the higher of buys/sells as a proxy
-  // since DexScreener doesn't expose unique wallet counts directly
   const uniqueWallets = Math.max(buys24, sells24, Math.floor(totalTxns * 0.7));
 
   const pc = pair.priceChange;
@@ -481,12 +474,15 @@ function pairToToken(pair: DexScreenerPair, holderCount: number = 0, supply: num
 
   const logo = pair.info?.imageUrl ?? null;
 
+  const holders = estimateHolderCount(totalTxns, buys24, sells24, createdAt, mc, liq);
+  const supply = estimateSupply(mc, price);
+
   return {
     address: addr,
     symbol: pair.baseToken.symbol ?? "UNKNOWN",
     name: pair.baseToken.name ?? null,
-    decimals,
-    holders: holderCount,
+    decimals: 9,
+    holders,
     supply,
     logo,
     price,
@@ -531,51 +527,9 @@ function filterMemecoins(pairs: DexScreenerPair[]): DexScreenerPair[] {
 }
 
 // ---------------------------------------------------------------------------
-// Token enrichment — fetch real on-chain data for a batch of tokens
-// Uses only cheap RPC calls (getTokenSupply + getTokenLargestAccounts) that
-// work reliably on free RPC endpoints.
+// DexScreener data fetching helpers
 // ---------------------------------------------------------------------------
 
-async function enrichWithOnChainData(pairs: DexScreenerPair[]): Promise<Token[]> {
-  // Batch-fetch supply + largest accounts for all tokens in one request.
-  // Both are cheap calls that work on free RPCs.
-  const allCalls: { method: string; params: any[] }[] = [];
-  for (const p of pairs) {
-    allCalls.push({ method: "getTokenSupply", params: [p.baseToken.address] });
-    allCalls.push({ method: "getTokenLargestAccounts", params: [p.baseToken.address] });
-  }
-
-  let results: any[] = [];
-  try {
-    results = await rpcBatchWithFallback(allCalls);
-  } catch {
-    results = pairs.map(() => null);
-  }
-
-  const tokens: Token[] = pairs.map((p, i) => {
-    const supplyResult = results?.[i * 2];
-    const largestResult = results?.[i * 2 + 1];
-
-    const supply = supplyResult?.value ? Number(supplyResult.value.uiAmount ?? 0) : 0;
-    const decimals = supplyResult?.value?.decimals ?? 9;
-
-    const largestAccounts: { address: string; amount: number }[] = Array.isArray(largestResult?.value)
-      ? largestResult.value.slice(0, 20).map((acc: any) => ({
-          address: acc.address ?? "unknown",
-          amount: Number(acc.uiAmount ?? 0),
-        }))
-      : [];
-
-    const trades24h = (p.txns?.h24?.buys ?? 0) + (p.txns?.h24?.sells ?? 0);
-    const holderCount = estimateHolderCount(largestAccounts, supply, trades24h);
-
-    return pairToToken(p, holderCount, supply, decimals);
-  });
-
-  return tokens;
-}
-
-// Fetch curated token pairs from DexScreener's various endpoints
 async function fetchCuratedPairs(): Promise<DexScreenerPair[]> {
   let pairs: DexScreenerPair[] = [];
 
@@ -653,7 +607,7 @@ async function searchMemecoins(terms: string[]): Promise<DexScreenerPair[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Data fetching functions
+// List view data functions — DexScreener only, no RPC calls
 // ---------------------------------------------------------------------------
 
 async function getNewTrending(): Promise<{ tokens: Token[] }> {
@@ -661,8 +615,7 @@ async function getNewTrending(): Promise<{ tokens: Token[] }> {
   const deduped = deduplicatePairs(curated);
   const filtered = filterMemecoins(deduped);
   const sorted = filtered.sort((a, b) => (b.pairCreatedAt ?? 0) - (a.pairCreatedAt ?? 0));
-  const top = sorted.slice(0, 20);
-  const tokens = await enrichWithOnChainData(top);
+  const tokens = sorted.slice(0, 25).map((p) => pairToToken(p));
   return { tokens };
 }
 
@@ -678,9 +631,9 @@ async function getGraduated(): Promise<{ tokens: Token[] }> {
       return liq > 20000 && isGraduatedDex;
     })
     .sort((a, b) => (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0))
-    .slice(0, 20);
+    .slice(0, 25);
 
-  const tokens = await enrichWithOnChainData(graduated);
+  const tokens = graduated.map((p) => pairToToken(p));
   return { tokens };
 }
 
@@ -706,9 +659,10 @@ async function getMostHeld(): Promise<{ tokens: Token[] }> {
       if (bTxns !== aTxns) return bTxns - aTxns;
       return (b.marketCap ?? 0) - (a.marketCap ?? 0);
     })
-    .slice(0, 20);
+    .slice(0, 25);
 
-  const tokens = await enrichWithOnChainData(ranked);
+  const tokens = ranked.map((p) => pairToToken(p));
+  // Sort by estimated holder count
   tokens.sort((a, b) => b.holders - a.holders);
   return { tokens };
 }
@@ -726,14 +680,17 @@ async function getTopMovers(): Promise<{ tokens: Token[] }> {
   const sorted = filtered
     .map((p) => ({ pair: p, absChange: Math.abs(p.priceChange?.h24 ?? 0) }))
     .sort((a, b) => b.absChange - a.absChange)
-    .slice(0, 20)
+    .slice(0, 25)
     .map((x) => x.pair);
 
-  const tokens = await enrichWithOnChainData(sorted);
+  const tokens = sorted.map((p) => pairToToken(p));
   return { tokens };
 }
 
-// TOKEN DETAIL — full data for a single token
+// ---------------------------------------------------------------------------
+// TOKEN DETAIL — full data for a single token (uses RPC for real on-chain data)
+// ---------------------------------------------------------------------------
+
 async function getTokenDetail(mint: string): Promise<{
   info: TokenInfo;
   market: MarketData;
@@ -757,40 +714,18 @@ async function getTokenDetail(mint: string): Promise<{
 
   const bestPair = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
 
-  // Fetch supply, top holders, and try real holder count in parallel.
-  // getRealHolderCount uses the expensive getTokenProgramAccounts call —
-  // only可行 for a single token, not list views.
-  const [supplyData, topHolders, realHolderCount] = await Promise.all([
-    getTokenSupply(mint),
-    getTopHolders(mint),
-    getRealHolderCount(mint),
-  ]);
-
-  const decimals = supplyData?.decimals ?? 9;
-  const supply = supplyData?.supply ?? 0;
-
-  // Determine holder count: prefer real count, fall back to estimate
-  let holderCount: number;
-  if (realHolderCount != null && realHolderCount > 0) {
-    holderCount = realHolderCount;
-  } else {
-    // Estimate from top holders data
-    const trades24h = bestPair ? (bestPair.txns?.h24?.buys ?? 0) + (bestPair.txns?.h24?.sells ?? 0) : 0;
-    const largestAccounts = topHolders.map((h) => ({ address: h.owner, amount: h.balance }));
-    holderCount = estimateHolderCount(largestAccounts, supply, trades24h);
-  }
-
+  // Start with DexScreener-based estimate
   let token: Token;
   if (bestPair) {
-    token = pairToToken(bestPair, holderCount, supply, decimals);
+    token = pairToToken(bestPair);
   } else {
     token = {
       address: mint,
       symbol: "UNKNOWN",
       name: null,
-      decimals,
-      holders: holderCount,
-      supply,
+      decimals: 9,
+      holders: 0,
+      supply: 0,
       logo: null,
       price: 0,
       volume_24h: 0,
@@ -813,6 +748,74 @@ async function getTokenDetail(mint: string): Promise<{
       holder_change_24h: 0,
       last_trade_at: null,
     };
+  }
+
+  // Try to enrich with real on-chain data + Jupiter price (single token, safe to make RPC calls)
+  const [supplyData, largestAccounts, jupiterPrice] = await Promise.all([
+    getTokenSupply(mint),
+    getLargestAccounts(mint),
+    getJupiterPrice(mint),
+  ]);
+
+  if (supplyData) {
+    token.supply = supplyData.supply;
+    token.decimals = supplyData.decimals;
+  }
+
+  // Override price with Jupiter's real-time price if available (more accurate)
+  if (jupiterPrice && jupiterPrice > 0) {
+    token.price = jupiterPrice;
+    // Recalculate market cap from real price + real supply
+    if (token.supply > 0) {
+      token.market_cap = token.supply * jupiterPrice;
+      token.fdv = token.market_cap;
+    }
+  }
+
+  // Resolve top holder wallet addresses via batch getAccountInfo
+  let topHolders: HolderInfo[] = [];
+  if (largestAccounts.length > 0) {
+    const totalSupply = supplyData?.supply ?? largestAccounts.reduce((s, a) => s + a.amount, 0);
+
+    try {
+      const ownerCalls = largestAccounts.map((acc) => ({
+        method: "getAccountInfo",
+        params: [acc.address, { encoding: "jsonParsed" }],
+      }));
+      const ownerResults = await rpcBatchWithFallback(ownerCalls);
+
+      const holders: HolderInfo[] = largestAccounts.map((acc, i) => {
+        const ownerData = ownerResults?.[i]?.value?.data?.parsed;
+        const walletOwner = ownerData?.info?.owner ?? acc.address;
+        const balance = acc.amount;
+        const pct = totalSupply > 0 ? (balance / totalSupply) * 100 : 0;
+        return { owner: walletOwner, balance, pct };
+      });
+
+      // Deduplicate by wallet owner
+      const byOwner = new Map<string, { balance: number; pct: number }>();
+      for (const h of holders) {
+        const existing = byOwner.get(h.owner);
+        if (existing) {
+          existing.balance += h.balance;
+          existing.pct += h.pct;
+        } else {
+          byOwner.set(h.owner, { balance: h.balance, pct: h.pct });
+        }
+      }
+
+      topHolders = Array.from(byOwner.entries())
+        .map(([owner, data]) => ({ owner, balance: data.balance, pct: data.pct }))
+        .sort((a, b) => b.balance - a.balance)
+        .slice(0, 20);
+    } catch {
+      // Fallback: use token account addresses without owner resolution
+      topHolders = largestAccounts.map((acc) => ({
+        owner: acc.address,
+        balance: acc.amount,
+        pct: totalSupply > 0 ? (acc.amount / totalSupply) * 100 : 0,
+      }));
+    }
   }
 
   // Build trade data from DexScreener txn counts
@@ -844,12 +847,13 @@ async function getTokenDetail(mint: string): Promise<{
     }
   }
 
-  const { address, symbol, name, decimals: dec, holders: h, supply: sup, logo, ...market } = token;
+  const { address, symbol, name, decimals, holders, supply, logo, ...market } = token;
   return {
-    info: { address, symbol, name, decimals: dec, holders: h, supply: sup, logo },
+    info: { address, symbol, name, decimals, holders, supply, logo },
     market: market as MarketData,
     trades,
     holders: topHolders,
+    jupiterPrice: jupiterPrice,
   };
 }
 
@@ -894,6 +898,39 @@ Deno.serve(async (req: Request) => {
           );
         }
         result = await getTokenDetail(mint);
+        break;
+      }
+      case "swap-quote": {
+        const inputMint = params.get("inputMint") || SOL_MINT;
+        const outputMint = params.get("outputMint") || params.get("mint") || "";
+        const amount = params.get("amount") || "1000000";
+        const slippage = parseInt(params.get("slippageBps") || "50", 10);
+        if (!outputMint) {
+          return new Response(
+            JSON.stringify({ error: "Missing outputMint or mint parameter" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        const quote = await getJupiterSwapQuote(inputMint, outputMint, amount, slippage);
+        if (!quote) {
+          return new Response(
+            JSON.stringify({ error: "No swap route found. The token may not have sufficient liquidity." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        result = quote;
+        break;
+      }
+      case "price": {
+        const mint = params.get("mint") || "";
+        if (!mint) {
+          return new Response(
+            JSON.stringify({ error: "Missing mint parameter" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        const price = await getJupiterPrice(mint);
+        result = { mint, price };
         break;
       }
       default:
